@@ -3,17 +3,19 @@
 
 #include <iostream>
 #include <stdio.h>
+#include <vector>
 #include <chrono>
 #include "lodepng.h"
 #include <cstdlib>
 using namespace std;
 
 bool TESTMODE = true;
+bool DEBUG = true;
 
 __global__ void maxPool(unsigned char* ip_img, unsigned char* op_img, unsigned int* d_width, unsigned int* d_pix_per_thread, unsigned int* d_op_pixels) {
 	int startIndex = threadIdx.x * *d_pix_per_thread;
 	int op_width = *d_width / 2;
-	printf("%d\n", *d_pix_per_thread);
+	//printf("%d\n", *d_pix_per_thread);
 	int curr_index = startIndex;
 
 	for (int i{ 0 }; i < *d_pix_per_thread; i++) {
@@ -24,10 +26,10 @@ __global__ void maxPool(unsigned char* ip_img, unsigned char* op_img, unsigned i
 
 		ip_coods[0] = 2 * op_coods[0];
 		ip_coods[1] = 2 * op_coods[1];
-			
+
 		//convert back from cartesian to linear
 		int ip_idx = 4 * (ip_coods[0] + ip_coods[1] * *d_width);
-		
+
 		//search the 2x2 for the max value of each layer
 		unsigned char max_rgba[4] = { 0,0,0,0 };
 		for (int j{ 0 }; j < 4; j++) {
@@ -49,7 +51,7 @@ __global__ void maxPool(unsigned char* ip_img, unsigned char* op_img, unsigned i
 			}
 
 		}
-		
+
 		//write to output
 		for (int j{ 0 }; j < 4; j++)
 			op_img[4 * curr_index + j] = max_rgba[j];			//TODO replace RHS
@@ -58,51 +60,6 @@ __global__ void maxPool(unsigned char* ip_img, unsigned char* op_img, unsigned i
 	}
 }
 
-vector<unsigned char> singleThreadedPool(vector<unsigned char> ip_img, int ip_width, int ip_height) {
-	printf("hit");
-	vector<unsigned char> output;
-	
-	int op_width = ip_width / 2;
-	int op_height = ip_height / 2;
-	
-	//loop for each output pixel (in order)
-	for (int op_y{ 0 }; op_y < op_height; op_y++) {
-		for (int op_x{ 0 }; op_x < op_width; op_x++) {
-			//get the cartesion for the input
-			int ip_coord[2];
-			ip_coord[0] = 2 * op_x;
-			ip_coord[1] = 2 * op_y;
-			int ip_idx = 4 * (ip_coord[0] + ip_coord[1] * ip_width);
-
-			//search the pixels in the 2x2
-			unsigned char max_rgba[4] = { 0,0,0,0 };
-			for (int i{ 0 }; i < 4; i++) {
-				int target = ip_idx;
-
-				switch (i) {	//switch to visit each pixel
-				case 0: break;
-				case 1: target += 4; break;
-				case 2: target += 4 * ip_width; break;
-				case 3: target += 4 * ip_width; break;
-				default: printf("This should be unreachable...."); break;
-				}
-
-				//check to see if we have a new winner
-				for (int j{ 0 }; j < 4; j++) {
-					if (ip_img[target + j] > max_rgba[j])
-						max_rgba[j] = ip_img[target + j];
-				}
-			}
-
-			//write to output
-			for (int i{ 0 }; i < 4; i++)
-				output.push_back(max_rgba[i]);
-
-		}
-	}
-	return output;
-
-}
 
 int main(int argc, char* argv[]) {
 	//default CLAs
@@ -120,22 +77,40 @@ int main(int argc, char* argv[]) {
 
 	//load the image
 	unsigned error = lodepng::decode(img, width, height, ip_img_name);
+
 	//if (error) cout << "Error loading image: " << error << ": " << lodepng_error_text(error) << endl;
 
 	if (num_threads == 1) {
 		auto start = chrono::high_resolution_clock::now();
 
-		vector<unsigned char> output = singleThreadedPool(img, width, height);
+		vector<unsigned char> output;
+		for (int row{ 0 }; row < height; row += 2) {
+
+			for (int column{ 0 }; column < width; column += 2) {
+
+				int start_of_pixel = 4 * (row * width + column);
+
+				for (int layer{ 0 }; layer < 4; layer++) {
+
+					int max = img[start_of_pixel + layer] > img[start_of_pixel + layer + 4] ? img[start_of_pixel + layer] : img[start_of_pixel + layer + 4];
+					max = max > img[start_of_pixel + layer + 4 * width] ? max : img[start_of_pixel + layer + 4 * width];
+					max = max > img[start_of_pixel + layer + 4 * width + 4] ? max : img[start_of_pixel + layer + 4 * width + 4];
+
+					output.push_back(max);
+
+				}
+			}
+		}
 
 		auto end = chrono::high_resolution_clock::now();
-	
-		error = lodepng::encode(op_img_name, output, width/2, height/2);
+
+		error = lodepng::encode(op_img_name, output, width / 2, height / 2);
 
 		auto time = chrono::duration_cast<chrono::nanoseconds>(end - start).count();
 		if (TESTMODE)
 			cout << time << endl;
 	}
-	else{
+	else {
 		int op_width = width / 2;
 		int op_height = height / 2;
 		int op_pixels = op_width * op_height * 4;
@@ -173,8 +148,8 @@ int main(int argc, char* argv[]) {
 
 		/******************** Parallel Computations ********************/
 		auto being_parallel = chrono::high_resolution_clock::now();
-	
-		maxPool<<<1, num_threads >>> (d_ip_img, d_op_img, d_width, d_pix_per_thread, d_op_pixels);
+
+		maxPool << < 1, num_threads >> > (d_ip_img, d_op_img, d_width, d_pix_per_thread, d_op_pixels);
 
 		auto end_parallel = chrono::high_resolution_clock::now();
 		/************************* End Parallel *************************/
